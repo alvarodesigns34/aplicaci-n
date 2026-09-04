@@ -5,6 +5,9 @@
 [![Three.js](https://img.shields.io/badge/Three.js-WebGL-black?style=flat-square&logo=three.js)](https://threejs.org/)
 [![Vite](https://img.shields.io/badge/Vite-5.4-646cff?style=flat-square&logo=vite)](https://vitejs.dev/)
 [![Tailwind CSS](https://img.shields.io/badge/TailwindCSS-3.4-38bdf8?style=flat-square&logo=tailwindcss)](https://tailwindcss.com/)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Playable%20Simulation-00f0ff?style=flat-square&logo=google-chrome)](https://alvarodesigns34.github.io/aplicaci-n/)
+
+🎮 **Live Playable Simulation:** [https://alvarodesigns34.github.io/aplicaci-n/](https://alvarodesigns34.github.io/aplicaci-n/)
 
 **Internet 2035** is a planetary-scale infrastructure simulation platform and mission-control cyber-operating system modeling the technological convergence of 2030 through 2050.
 
