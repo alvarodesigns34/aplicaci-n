@@ -90,78 +90,116 @@ export function calculateSimulationFrame(
   tickSeed: number
 ): SimulationMetrics {
   const base = getInterpolatedBaseline(year);
+  const baselineRef = { ...base };
   const mult = scenario.multipliers;
 
-  // Apply scenario multipliers
+  // 1. Apply scenario multipliers to primary variables
   base.aiComputeExaflops *= mult.aiCompute;
   base.energyProductionTWh *= mult.energyProduction;
-  base.renewableEnergyPercent = Math.min(99.5, base.renewableEnergyPercent * mult.renewablePercent);
+  base.renewableEnergyPercent = Math.min(99.5, Math.max(10, base.renewableEnergyPercent * mult.renewablePercent));
   base.batteryStorageGWh *= mult.batteryStorage;
   base.activeSatellites = Math.round(base.activeSatellites * mult.satelliteCount);
   base.globalBandwidthPbps *= mult.networkBandwidth;
   base.robotPopulationMillions *= mult.roboticsCount;
   base.coolingStressPercent = Math.min(98, Math.max(10, base.coolingStressPercent / mult.coolingEfficiency));
 
-  // --- MATHEMATICAL INTERDEPENDENCY EQUATIONS ---
+  // --- MATHEMATICAL INTERDEPENDENCY EQUATIONS (relative to baseline milestone) ---
 
-  // 1. AI Compute dictates Data Center Power requirements
-  // Higher compute increases required data center capacity and power draw
-  const aiPowerDemandFactor = (base.aiComputeExaflops / 135) * 0.45 + 0.55;
-  base.dataCenterCapacityGW *= aiPowerDemandFactor;
-
-  // 2. Data Centers + Robots dictate consumption
-  // Power needed for DC: Capacity * Utilization * PUE
-  const dcPowerAnnualTWh = (base.dataCenterCapacityGW * 8760 * (base.dataCenterUtilization / 100) * base.pueAverage) / 1000;
-  const robotPowerAnnualTWh = (base.robotEnergyDemandGW * (base.robotPopulationMillions / 90) * 8760) / 1000;
-  base.energyConsumptionTWh += (dcPowerAnnualTWh * 0.6 + robotPowerAnnualTWh * 0.4);
-
-  // 3. Grid Stress calculation:
-  // Ratio of consumption to production modified by battery buffering
-  const energyMarginRatio = (base.energyProductionTWh - base.energyConsumptionTWh) / base.energyProductionTWh;
-  let rawGridStress = 60 - (energyMarginRatio * 150);
-  // Battery buffering mitigates stress
-  const batteryBufferFactor = Math.min(1.0, base.batteryStorageGWh / 10000);
-  rawGridStress -= (batteryBufferFactor * 15);
-  base.gridStressPercent = Math.max(10, Math.min(98, rawGridStress));
-
-  // 4. Satellite Coverage & Laser Bandwidth impact on Latency
-  // More satellites and optical mesh lower global latency
-  const satRatio = Math.min(2.5, base.activeSatellites / 50000);
-  base.satelliteCoveragePercent = Math.min(99.9, base.satelliteCoveragePercent * (0.8 + 0.2 * satRatio));
-  base.opticalLaserBandwidthTbps *= Math.sqrt(satRatio);
-
-  // High grid stress degrades routing infrastructure
-  if (base.gridStressPercent > 75) {
-    const stressPenalty = (base.gridStressPercent - 75) * 0.8;
-    base.networkLatencyMs += stressPenalty;
-    base.subseaCableIntegrityPercent = Math.max(40, base.subseaCableIntegrityPercent - stressPenalty * 0.3);
+  // 2. AI Compute dictates Data Center Capacity, Cloud Demand, and Cooling Stress
+  const computeRatio = base.aiComputeExaflops / baselineRef.aiComputeExaflops;
+  if (computeRatio !== 1) {
+    base.dataCenterCapacityGW *= (1 + (computeRatio - 1) * 0.45);
+    base.cloudDemandEBMonth *= (1 + (computeRatio - 1) * 0.40);
+    base.coolingStressPercent = Math.min(98, Math.max(10, base.coolingStressPercent + (computeRatio - 1) * 6));
+    base.aiAdoptionRate = Math.min(99.9, Math.max(5, base.aiAdoptionRate * (computeRatio >= 1 ? 1 + (computeRatio - 1) * 0.08 : computeRatio)));
   }
 
-  // 5. Automation Efficiency impacts Infrastructure Resilience
-  base.automationEfficiencyPercent = Math.min(99, base.automationEfficiencyPercent * (base.robotPopulationMillions > 50 ? 1.05 : 0.95));
+  // 3. Data Centers + Robotics power delta updates energy consumption
+  const deltaDCGW = base.dataCenterCapacityGW - baselineRef.dataCenterCapacityGW;
+  const dcPowerDeltaTWh = (deltaDCGW * 8760 * (base.dataCenterUtilization / 100) * base.pueAverage) / 1000;
+  const deltaRobotsM = base.robotPopulationMillions - baselineRef.robotPopulationMillions;
+  const robotPowerDeltaTWh = (deltaRobotsM * base.robotEnergyDemandGW * 8760) / (Math.max(1, baselineRef.robotPopulationMillions) * 1000);
+  base.energyConsumptionTWh = Math.max(1000, base.energyConsumptionTWh + dcPowerDeltaTWh + robotPowerDeltaTWh);
 
-  // 6. Stochastic micro-fluctuation for alive HUD realism
-  const noise = (Math.sin(tickSeed * 0.12) + Math.cos(tickSeed * 0.23)) * 0.008;
-  base.aiComputeExaflops *= (1 + noise * 0.5);
-  base.networkLatencyMs = Math.max(1.2, base.networkLatencyMs * (1 + noise * 0.8));
-  base.gridStressPercent = Math.max(5, Math.min(99, base.gridStressPercent + noise * 4));
+  // 4. Grid Stress calculation:
+  // Evaluates shift in generation vs consumption balance buffered by battery reserves
+  const baseMargin = (baselineRef.energyProductionTWh - baselineRef.energyConsumptionTWh) / baselineRef.energyProductionTWh;
+  const curMargin = (base.energyProductionTWh - base.energyConsumptionTWh) / base.energyProductionTWh;
+  const marginShift = curMargin - baseMargin;
+  const batteryShiftRatio = (base.batteryStorageGWh - baselineRef.batteryStorageGWh) / Math.max(1, baselineRef.batteryStorageGWh);
+  const rawGridStress = baselineRef.gridStressPercent - (marginShift * 110) - (batteryShiftRatio * 8);
+  base.gridStressPercent = Math.max(8, Math.min(98, rawGridStress));
 
-  // 7. Composite Global System Health Synthesis
-  const energyHealth = Math.max(0, Math.min(100, 100 - (base.gridStressPercent - 30) * 1.2));
-  const networkHealth = (base.subseaCableIntegrityPercent * 0.4 + base.satelliteCoveragePercent * 0.4 + Math.max(0, 100 - base.networkLatencyMs * 2) * 0.2);
-  const computeHealth = Math.max(0, 100 - (base.coolingStressPercent - 30) * 1.1);
-  const orbitalHealth = base.orbitalHealthPercent;
+  // 5. Satellite Constellation impact on Coverage, Laser Mesh, and Latency
+  const satRatio = base.activeSatellites / Math.max(1, baselineRef.activeSatellites);
+  base.satelliteCoveragePercent = Math.min(
+    99.9,
+    Math.max(15, baselineRef.satelliteCoveragePercent * (satRatio >= 1 ? 1 + (satRatio - 1) * 0.04 : satRatio))
+  );
+  base.opticalLaserBandwidthTbps = Math.max(10, baselineRef.opticalLaserBandwidthTbps * Math.sqrt(satRatio));
+
+  let latencyFactor = 1 / Math.max(0.3, Math.sqrt(satRatio));
+  if (base.gridStressPercent > 75) {
+    const stressPenalty = (base.gridStressPercent - 75) * 0.02;
+    latencyFactor += stressPenalty;
+    base.subseaCableIntegrityPercent = Math.max(35, baselineRef.subseaCableIntegrityPercent - (base.gridStressPercent - 75) * 0.4);
+  }
+  base.networkLatencyMs = Math.max(0.8, baselineRef.networkLatencyMs * latencyFactor);
+
+  // 6. Automation Efficiency & Urban Edge Compute
+  const robotRatio = base.robotPopulationMillions / Math.max(1, baselineRef.robotPopulationMillions);
+  base.automationEfficiencyPercent = Math.min(
+    99.5,
+    Math.max(20, baselineRef.automationEfficiencyPercent * (robotRatio >= 1 ? 1 + (robotRatio - 1) * 0.06 : robotRatio))
+  );
+  base.edgeComputeLoadPercent = Math.min(
+    98,
+    Math.max(10, baselineRef.edgeComputeLoadPercent * (robotRatio >= 1 ? 1 + (robotRatio - 1) * 0.05 : robotRatio))
+  );
+
+  // 7. Stochastic micro-fluctuation for alive HUD realism
+  if (tickSeed > 0) {
+    const noise = (Math.sin(tickSeed * 0.12) + Math.cos(tickSeed * 0.23)) * 0.005;
+    base.aiComputeExaflops *= (1 + noise * 0.3);
+    base.networkLatencyMs = Math.max(0.8, base.networkLatencyMs * (1 + noise * 0.5));
+    base.gridStressPercent = Math.max(5, Math.min(99, base.gridStressPercent + noise * 2));
+  }
+
+  // 8. Composite Global System Health Synthesis (calibrated relative to baseline milestone)
+  const gridStressDelta = base.gridStressPercent - baselineRef.gridStressPercent;
+  const latencyRatio = base.networkLatencyMs / Math.max(0.1, baselineRef.networkLatencyMs);
+  const coolingDelta = base.coolingStressPercent - baselineRef.coolingStressPercent;
+  const orbitalDelta = baselineRef.orbitalHealthPercent - base.orbitalHealthPercent;
+  const cableDelta = baselineRef.subseaCableIntegrityPercent - base.subseaCableIntegrityPercent;
+
+  const healthDeduction = 
+    (Math.max(0, gridStressDelta) * 0.35) +
+    (Math.max(0, latencyRatio - 1) * 18) +
+    (Math.max(0, coolingDelta) * 0.20) +
+    (Math.max(0, orbitalDelta) * 0.30) +
+    (Math.max(0, cableDelta) * 0.30);
+
+  const healthBonus = 
+    (Math.max(0, -gridStressDelta) * 0.15) +
+    (Math.max(0, 1 - latencyRatio) * 8);
 
   base.globalSystemHealth = Math.max(
     5,
-    Math.min(99.9, energyHealth * 0.35 + networkHealth * 0.30 + computeHealth * 0.20 + orbitalHealth * 0.15)
-  );
-  base.resilienceScore = Math.max(
-    10,
-    Math.min(99.5, (base.batteryStorageGWh / 100) * 0.2 + base.automationEfficiencyPercent * 0.4 + base.globalSystemHealth * 0.4)
+    Math.min(99.5, baselineRef.globalSystemHealth - healthDeduction + healthBonus)
   );
 
-  // 8. Apply dynamic events overlay
+  base.resilienceScore = Math.max(
+    10,
+    Math.min(
+      99.5,
+      baselineRef.resilienceScore +
+      ((base.batteryStorageGWh - baselineRef.batteryStorageGWh) / Math.max(1, baselineRef.batteryStorageGWh)) * 12 +
+      (base.automationEfficiencyPercent - baselineRef.automationEfficiencyPercent) * 0.25 -
+      healthDeduction * 0.5
+    )
+  );
+
+  // 9. Apply dynamic events overlay
   const finalMetrics = applyEventsToMetrics(base, activeEvents);
 
   return finalMetrics;

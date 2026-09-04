@@ -6,25 +6,42 @@ import { AtmosphereShader, createCyberEarthTexture, latLonToVector3 } from './gl
 import { GlobeNodeLocation } from '../../types/simulation';
 
 const GLOBE_RADIUS = 100;
+const MAX_LASER_PAIRS = 48;
 
 export const GlobeView: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { 
     visualLayers, 
+    toggleLayer,
     selectedNode, 
     setSelectedNode, 
-    setSelectedSubsystem 
+    setSelectedSubsystem,
+    metrics,
+    year,
+    scenario,
+    activeEvents
   } = useSimulation();
+
+  // Dynamic simulation telemetry refs for 60fps WebGL loop without scene tearing
+  const metricsRef = useRef(metrics);
+  metricsRef.current = metrics;
+  const yearRef = useRef(year);
+  yearRef.current = year;
+  const activeEventsRef = useRef(activeEvents);
+  activeEventsRef.current = activeEvents;
+  const scenarioRef = useRef(scenario);
+  scenarioRef.current = scenario;
 
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const globeGroupRef = useRef<THREE.Group | null>(null);
   const satellitesGroupRef = useRef<THREE.Group | null>(null);
-  const laserBeamsGroupRef = useRef<THREE.Group | null>(null);
+  const laserBeamsGroupRef = useRef<THREE.LineSegments | null>(null);
   const cablesGroupRef = useRef<THREE.Group | null>(null);
   const particlesGroupRef = useRef<THREE.Points | null>(null);
   const nodesGroupRef = useRef<THREE.Group | null>(null);
+  const atmosphereMeshRef = useRef<THREE.Mesh | null>(null);
 
   // Dragging / Rotation interaction refs
   const isDraggingRef = useRef<boolean>(false);
@@ -47,9 +64,13 @@ export const GlobeView: React.FC = () => {
     camera.position.set(0, 50, cameraDistance.current);
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true, 
+      alpha: true, 
+      powerPreference: 'high-performance' 
+    });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.2;
     rendererRef.current = renderer;
@@ -113,6 +134,7 @@ export const GlobeView: React.FC = () => {
     });
     const atmosphereMesh = new THREE.Mesh(atmosphereGeo, atmosphereMat);
     globeGroup.add(atmosphereMesh);
+    atmosphereMeshRef.current = atmosphereMesh;
 
     // 4. Lighting
     const ambientLight = new THREE.AmbientLight(0x0a1e36, 1.8);
@@ -183,14 +205,18 @@ export const GlobeView: React.FC = () => {
     globeGroup.add(cablesGroup);
     cablesGroupRef.current = cablesGroup;
 
+    // Precompute 3D spline curves once for subsea cables and photon flows
+    const cableCurves: THREE.CatmullRomCurve3[] = [];
+
     SUBSEA_CABLES.forEach(cable => {
       const curvePoints: THREE.Vector3[] = [];
       cable.points.forEach(([lat, lon]) => {
-        // Slightly elevate above globe
         curvePoints.push(latLonToVector3(lat, lon, GLOBE_RADIUS + 0.6));
       });
 
       const curve = new THREE.CatmullRomCurve3(curvePoints);
+      cableCurves.push(curve);
+
       const tubeGeo = new THREE.TubeGeometry(curve, 64, 0.4, 8, false);
       const tubeMat = new THREE.MeshBasicMaterial({
         color: cable.status === 'DAMAGED' ? 0xff3366 : 0x00f0ff,
@@ -198,6 +224,7 @@ export const GlobeView: React.FC = () => {
         opacity: 0.75
       });
       const cableMesh = new THREE.Mesh(tubeGeo, tubeMat);
+      cableMesh.userData = { cableData: cable };
       cablesGroup.add(cableMesh);
     });
 
@@ -206,9 +233,11 @@ export const GlobeView: React.FC = () => {
     const particleGeo = new THREE.BufferGeometry();
     const particlePositions = new Float32Array(particleCount * 3);
     const particleProgress = new Float32Array(particleCount);
+    const particleCableIndex = new Uint8Array(particleCount);
 
     for (let i = 0; i < particleCount; i++) {
       particleProgress[i] = Math.random();
+      particleCableIndex[i] = i % cableCurves.length;
     }
     particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
     const particleMat = new THREE.PointsMaterial({
@@ -222,7 +251,7 @@ export const GlobeView: React.FC = () => {
     globeGroup.add(particles);
     particlesGroupRef.current = particles;
 
-    // 8. Satellites Constellation
+    // 8. Satellites Constellation (Keplerian orbits)
     const satellitesGroup = new THREE.Group();
     globeGroup.add(satellitesGroup);
     satellitesGroupRef.current = satellitesGroup;
@@ -236,7 +265,11 @@ export const GlobeView: React.FC = () => {
 
       // Satellite bus
       const bodyGeo = new THREE.BoxGeometry(1.2, 0.6, 0.8);
-      const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, metalness: 0.9, roughness: 0.2 });
+      const bodyMat = new THREE.MeshStandardMaterial({ 
+        color: 0xe2e8f0, 
+        metalness: 0.9, 
+        roughness: 0.2 
+      });
       const body = new THREE.Mesh(bodyGeo, bodyMat);
       satMesh.add(body);
 
@@ -251,24 +284,28 @@ export const GlobeView: React.FC = () => {
         speed: 0.003 + (idx % 5) * 0.0006,
         orbitAngle: (idx / satsData.length) * Math.PI * 2,
         inclination: (sat.inclinationDeg * Math.PI) / 180,
-        planeOffset: sat.plane * (Math.PI / 4)
+        planeOffset: sat.plane * (Math.PI / 4),
+        index: idx
       };
 
       satMeshGroup.add(satMesh);
     });
     satellitesGroup.add(satMeshGroup);
 
-    // Laser cross-link beam lines
-    const laserBeamsGroup = new THREE.Group();
-    globeGroup.add(laserBeamsGroup);
-    laserBeamsGroupRef.current = laserBeamsGroup;
-
+    // High-performance preallocated LineSegments for optical laser cross-links
+    // Zero memory leaks: updates vertices buffer without reallocating geometries
+    const laserPositions = new Float32Array(MAX_LASER_PAIRS * 2 * 3);
+    const laserGeo = new THREE.BufferGeometry();
+    laserGeo.setAttribute('position', new THREE.BufferAttribute(laserPositions, 3));
     const laserMat = new THREE.LineBasicMaterial({
       color: 0x00f0ff,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.45,
       blending: THREE.AdditiveBlending
     });
+    const laserSegments = new THREE.LineSegments(laserGeo, laserMat);
+    globeGroup.add(laserSegments);
+    laserBeamsGroupRef.current = laserSegments;
 
     // 9. Resize Handling
     const handleResize = () => {
@@ -281,9 +318,10 @@ export const GlobeView: React.FC = () => {
     };
     window.addEventListener('resize', handleResize);
 
-    // 10. Pointer Interactions (Mouse Orbit + Zoom)
+    // 10. Pointer & Touch Interactions
     const dom = renderer.domElement;
 
+    // Mouse handlers
     const onMouseDown = (e: MouseEvent) => {
       isDraggingRef.current = true;
       previousMousePosition.current = { x: e.clientX, y: e.clientY };
@@ -296,7 +334,6 @@ export const GlobeView: React.FC = () => {
 
       targetRotation.current.y += deltaX * 0.006;
       targetRotation.current.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, targetRotation.current.x + deltaY * 0.006));
-
       previousMousePosition.current = { x: e.clientX, y: e.clientY };
     };
 
@@ -313,10 +350,10 @@ export const GlobeView: React.FC = () => {
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
-    const onClick = (e: MouseEvent) => {
+    const handleNodeRaycast = (clientX: number, clientY: number) => {
       const rect = dom.getBoundingClientRect();
-      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObjects(nodesGroup.children, true);
@@ -336,18 +373,79 @@ export const GlobeView: React.FC = () => {
       }
     };
 
+    const onClick = (e: MouseEvent) => {
+      handleNodeRaycast(e.clientX, e.clientY);
+    };
+
+    // Mobile / Touch handlers with pinch-to-zoom support
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartDist = 0;
+    let isTouchMoved = false;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        previousMousePosition.current = { x: touchStartX, y: touchStartY };
+        isDraggingRef.current = true;
+        isTouchMoved = false;
+      } else if (e.touches.length === 2) {
+        isDraggingRef.current = false;
+        touchStartDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 1 && isDraggingRef.current) {
+        const deltaX = e.touches[0].clientX - previousMousePosition.current.x;
+        const deltaY = e.touches[0].clientY - previousMousePosition.current.y;
+        if (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4) {
+          isTouchMoved = true;
+        }
+
+        targetRotation.current.y += deltaX * 0.007;
+        targetRotation.current.x = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, targetRotation.current.x + deltaY * 0.007));
+        previousMousePosition.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      } else if (e.touches.length === 2) {
+        isTouchMoved = true;
+        const dist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const deltaDist = touchStartDist - dist;
+        cameraDistance.current = Math.max(140, Math.min(500, cameraDistance.current + deltaDist * 0.5));
+        touchStartDist = dist;
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      isDraggingRef.current = false;
+      if (!isTouchMoved && e.changedTouches.length > 0) {
+        handleNodeRaycast(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+      }
+    };
+
     dom.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
     dom.addEventListener('wheel', onWheel, { passive: false });
     dom.addEventListener('click', onClick);
 
+    dom.addEventListener('touchstart', onTouchStart, { passive: true });
+    dom.addEventListener('touchmove', onTouchMove, { passive: true });
+    dom.addEventListener('touchend', onTouchEnd, { passive: true });
+
     // 11. Animation Loop
     let reqId: number;
-    let clock = new THREE.Clock();
+    const clock = new THREE.Clock();
 
     const animate = () => {
       const elapsedTime = clock.getElapsedTime();
+      const currentMetrics = metricsRef.current;
 
       // Smooth camera orbit damping
       currentRotation.current.x += (targetRotation.current.x - currentRotation.current.x) * 0.08;
@@ -368,13 +466,22 @@ export const GlobeView: React.FC = () => {
         camera.lookAt(0, 0, 0);
       }
 
-      // Animate Satellites in Keplerian Orbits
+      // Animate Satellites with Simulation Dynamics
+      // The number of visible satellites dynamically reflects constellation scale
       if (satMeshGroup) {
         const activeSatsPositions: THREE.Vector3[] = [];
+        const isDegraded = currentMetrics.orbitalHealthPercent < 80;
 
-        satMeshGroup.children.forEach((child) => {
+        // Visual density scales from 24 up to 72 based on activeSatellites
+        const visibleLimit = Math.max(20, Math.min(72, Math.round((currentMetrics.activeSatellites / 260000) * 52 + 20)));
+
+        satMeshGroup.children.forEach((child, idx) => {
+          child.visible = idx < visibleLimit;
+          if (!child.visible) return;
+
           const u = child.userData;
-          u.orbitAngle += u.speed;
+          // Satellites speed up or wobble under orbital storm
+          u.orbitAngle += u.speed * (isDegraded ? 1.4 : 1.0);
 
           const r = u.altitude;
           const inc = u.inclination;
@@ -390,50 +497,95 @@ export const GlobeView: React.FC = () => {
           const pz = ox * Math.sin(plane) + oz * Math.cos(plane);
 
           child.position.set(px, oy, pz);
-          child.lookAt(0, 0, 0);
 
-          if (activeSatsPositions.length < 24) {
+          if (isDegraded && idx % 3 === 0) {
+            // Tumbling motion for damaged satellites
+            child.rotation.x += 0.04;
+            child.rotation.z += 0.05;
+          } else {
+            child.lookAt(0, 0, 0);
+          }
+
+          if (activeSatsPositions.length < 32) {
             activeSatsPositions.push(new THREE.Vector3(px, oy, pz));
           }
         });
 
-        // Dynamic laser cross-links between nearest neighboring satellites
-        laserBeamsGroup.clear();
-        for (let i = 0; i < activeSatsPositions.length - 1; i += 2) {
+        // Dynamic laser cross-links using static preallocated LineSegments
+        const posArray = laserGeo.attributes.position.array as Float32Array;
+        let segmentCount = 0;
+
+        // Check if lasers are active and within range
+        const maxLinkDist = isDegraded ? 65 : 95;
+        for (let i = 0; i < activeSatsPositions.length - 1 && segmentCount < MAX_LASER_PAIRS; i += 2) {
           const p1 = activeSatsPositions[i];
           const p2 = activeSatsPositions[i + 1];
-          if (p1.distanceTo(p2) < 90) {
-            const lineGeo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
-            const laserLine = new THREE.Line(lineGeo, laserMat);
-            laserBeamsGroup.add(laserLine);
+          if (p1.distanceTo(p2) < maxLinkDist) {
+            const baseIdx = segmentCount * 6;
+            posArray[baseIdx] = p1.x;
+            posArray[baseIdx + 1] = p1.y;
+            posArray[baseIdx + 2] = p1.z;
+            posArray[baseIdx + 3] = p2.x;
+            posArray[baseIdx + 4] = p2.y;
+            posArray[baseIdx + 5] = p2.z;
+            segmentCount++;
           }
         }
+
+        // Draw only connected segments
+        laserGeo.setDrawRange(0, segmentCount * 2);
+        laserGeo.attributes.position.needsUpdate = true;
+
+        // Modulate laser appearance based on bandwidth & health
+        laserMat.color.set(isDegraded ? 0xff3366 : 0x00f0ff);
+        laserMat.opacity = Math.max(0.15, Math.min(0.85, (currentMetrics.opticalLaserBandwidthTbps / 1500) * 0.45));
       }
 
       // Animate Photon Data Particles along Subsea Cables
-      if (particlesGroupRef.current) {
+      if (particlesGroupRef.current && cableCurves.length > 0) {
         const positions = particlesGroupRef.current.geometry.attributes.position.array as Float32Array;
-        const cable = SUBSEA_CABLES[0]; // Primary trunk
-        const points = cable.points.map(([lat, lon]) => latLonToVector3(lat, lon, GLOBE_RADIUS + 1.2));
-        const curve = new THREE.CatmullRomCurve3(points);
+        // Data packet flow rate scales with global petabits bandwidth
+        const flowRate = 0.002 + Math.min(0.008, (currentMetrics.globalBandwidthPbps / 100) * 0.004);
 
         for (let i = 0; i < particleCount; i++) {
-          particleProgress[i] = (particleProgress[i] + 0.003) % 1;
+          particleProgress[i] = (particleProgress[i] + flowRate) % 1;
+          const curveIdx = particleCableIndex[i];
+          const curve = cableCurves[curveIdx];
           const pt = curve.getPointAt(particleProgress[i]);
+
           positions[i * 3] = pt.x;
           positions[i * 3 + 1] = pt.y;
           positions[i * 3 + 2] = pt.z;
         }
         particlesGroupRef.current.geometry.attributes.position.needsUpdate = true;
+
+        // Dynamic particle color based on network integrity
+        const partMat = particlesGroupRef.current.material as THREE.PointsMaterial;
+        if (currentMetrics.subseaCableIntegrityPercent < 75) {
+          partMat.color.set(0xff3366);
+        } else if (currentMetrics.networkLatencyMs > 20) {
+          partMat.color.set(0xfbbf24);
+        } else {
+          partMat.color.set(0x00ff9d);
+        }
       }
 
-      // Pulsate Nodes crowns
+      // Pulsate Nodes crowns and dynamically scale spires with real-time compute load
       if (nodesGroupRef.current) {
+        const isHighStress = currentMetrics.gridStressPercent > 75;
+
         nodesGroupRef.current.children.forEach((nObj, i) => {
-          const beacon = nObj.children[2];
+          const beacon = nObj.children[2] as THREE.Mesh;
           if (beacon) {
-            const scale = 1 + Math.sin(elapsedTime * 4 + i) * 0.25;
+            const scale = 1 + Math.sin(elapsedTime * 4 + i) * 0.28;
             beacon.scale.set(scale, scale, scale);
+
+            const bMat = beacon.material as THREE.MeshBasicMaterial;
+            if (isHighStress) {
+              bMat.color.set(Math.sin(elapsedTime * 8) > 0 ? 0xff3366 : 0xfbbf24);
+            } else {
+              bMat.color.set(0xffffff);
+            }
           }
         });
       }
@@ -444,7 +596,7 @@ export const GlobeView: React.FC = () => {
 
     reqId = requestAnimationFrame(animate);
 
-    // Cleanup on unmount
+    // Comprehensive Cleanup on unmount
     return () => {
       cancelAnimationFrame(reqId);
       window.removeEventListener('resize', handleResize);
@@ -453,6 +605,23 @@ export const GlobeView: React.FC = () => {
       window.removeEventListener('mouseup', onMouseUp);
       dom.removeEventListener('wheel', onWheel);
       dom.removeEventListener('click', onClick);
+
+      dom.removeEventListener('touchstart', onTouchStart);
+      dom.removeEventListener('touchmove', onTouchMove);
+      dom.removeEventListener('touchend', onTouchEnd);
+
+      // Clean GPU memory allocations
+      starsGeo.dispose();
+      starsMat.dispose();
+      earthGeo.dispose();
+      earthMat.dispose();
+      earthTexture.dispose();
+      atmosphereGeo.dispose();
+      atmosphereMat.dispose();
+      laserGeo.dispose();
+      laserMat.dispose();
+      particleGeo.dispose();
+      particleMat.dispose();
 
       if (renderer.domElement.parentElement) {
         renderer.domElement.parentElement.removeChild(renderer.domElement);
@@ -468,7 +637,21 @@ export const GlobeView: React.FC = () => {
     if (cablesGroupRef.current) cablesGroupRef.current.visible = visualLayers.subseaCables;
     if (nodesGroupRef.current) nodesGroupRef.current.visible = visualLayers.megacities || visualLayers.dataCenters;
     if (particlesGroupRef.current) particlesGroupRef.current.visible = visualLayers.dataParticles;
+    if (atmosphereMeshRef.current) atmosphereMeshRef.current.visible = visualLayers.atmosphereGlow;
   }, [visualLayers]);
+
+  // Update Atmosphere Glow color reactively based on System Health Status
+  useEffect(() => {
+    if (!atmosphereMeshRef.current) return;
+    const mat = atmosphereMeshRef.current.material as THREE.ShaderMaterial;
+    if (metrics.healthStatus === 'NOMINAL') {
+      mat.uniforms.glowColor.value.set(0x00f0ff);
+    } else if (metrics.healthStatus === 'ELEVATED_STRESS') {
+      mat.uniforms.glowColor.value.set(0xfbbf24);
+    } else {
+      mat.uniforms.glowColor.value.set(0xff3366);
+    }
+  }, [metrics.healthStatus]);
 
   // Handle auto-focus camera when a node is selected
   useEffect(() => {
@@ -484,7 +667,7 @@ export const GlobeView: React.FC = () => {
   }, [selectedNode]);
 
   return (
-    <div className="relative w-full h-full overflow-hidden select-none">
+    <div className="relative w-full h-full overflow-hidden select-none touch-none">
       <div ref={containerRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
       {/* 3D Viewport Controls HUD overlay */}
@@ -525,7 +708,7 @@ export const GlobeView: React.FC = () => {
         {(Object.keys(visualLayers) as (keyof typeof visualLayers)[]).map((layer) => (
           <button
             key={layer}
-            onClick={() => useSimulation().toggleLayer(layer)}
+            onClick={() => toggleLayer(layer)}
             className={`px-2.5 py-1 text-[11px] font-mono uppercase tracking-wider rounded border transition-all ${
               visualLayers[layer]
                 ? 'bg-cyan-950/60 border-cyber-cyan text-cyber-cyan shadow-[0_0_10px_rgba(0,240,255,0.2)]'

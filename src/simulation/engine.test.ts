@@ -69,6 +69,43 @@ describe('Simulation Engine - Mathematical Dynamics', () => {
     expect(updated.networkLatencyMs).toBeGreaterThan(base.networkLatencyMs);
   });
 
+  it('maintains nominal health across all baseline milestones without artificial stress spikes', () => {
+    const baselineScenario = SCENARIOS.find(s => s.id === 'baseline')!;
+    [2030, 2035, 2040, 2050].forEach(y => {
+      const frame = calculateSimulationFrame(y, baselineScenario, [], 0);
+      expect(frame.healthStatus).toBe('NOMINAL');
+      expect(frame.globalSystemHealth).toBeGreaterThan(80);
+      expect(frame.gridStressPercent).toBeLessThan(70);
+    });
+  });
+
+  it('correctly shifts system status into CASCADE_FAILURE under Infrastructure Collapse', () => {
+    const collapseScenario = SCENARIOS.find(s => s.id === 'infrastructure_collapse')!;
+    const collapseFrame = calculateSimulationFrame(2035, collapseScenario, [], 0);
+
+    expect(collapseFrame.activeSatellites).toBeLessThan(BASELINE_YEARS[2035].activeSatellites);
+    expect(collapseFrame.networkLatencyMs).toBeGreaterThan(BASELINE_YEARS[2035].networkLatencyMs);
+    expect(collapseFrame.globalSystemHealth).toBeLessThan(50);
+    expect(['CRITICAL_RISK', 'CASCADE_FAILURE']).toContain(collapseFrame.healthStatus);
+  });
+
+  it('correctly boosts connectivity under Global Connectivity scenario', () => {
+    const connScenario = SCENARIOS.find(s => s.id === 'global_connectivity')!;
+    const connFrame = calculateSimulationFrame(2035, connScenario, [], 0);
+
+    expect(connFrame.activeSatellites).toBeGreaterThan(BASELINE_YEARS[2035].activeSatellites);
+    expect(connFrame.networkLatencyMs).toBeLessThan(BASELINE_YEARS[2035].networkLatencyMs);
+    expect(connFrame.globalBandwidthPbps).toBeGreaterThan(BASELINE_YEARS[2035].globalBandwidthPbps);
+  });
+
+  it('correctly boosts robotics and automation under Autonomous Cities scenario', () => {
+    const autoCities = SCENARIOS.find(s => s.id === 'autonomous_cities')!;
+    const cityFrame = calculateSimulationFrame(2035, autoCities, [], 0);
+
+    expect(cityFrame.robotPopulationMillions).toBeGreaterThan(BASELINE_YEARS[2035].robotPopulationMillions * 2);
+    expect(cityFrame.automationEfficiencyPercent).toBeGreaterThan(BASELINE_YEARS[2035].automationEfficiencyPercent);
+  });
+
   it('generates well-formed random events', () => {
     const randEvent = createRandomEvent(2035);
     expect(randEvent.id).toBeDefined();

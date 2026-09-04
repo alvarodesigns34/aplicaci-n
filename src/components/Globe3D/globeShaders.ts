@@ -18,8 +18,9 @@ export const AtmosphereShader = {
     uniform float power;
 
     void main() {
-      float intensity = pow(coefficient - dot(vNormal, vec3(0.0, 0.0, 1.0)), power);
-      gl_FragColor = vec4(glowColor, intensity * 0.7);
+      float rim = max(0.0, coefficient - dot(vNormal, vec3(0.0, 0.0, 1.0)));
+      float intensity = pow(rim, power);
+      gl_FragColor = vec4(glowColor, intensity * 0.75);
     }
   `
 };

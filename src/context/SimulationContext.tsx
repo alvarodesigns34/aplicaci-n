@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   SimulationMetrics, 
   Year, 
@@ -82,36 +82,44 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [tickSeed, setTickSeed] = useState<number>(0);
 
   // Active events are those with remaining duration
-  const activeEvents = events.filter(e => e.active);
+  const activeEvents = useMemo(() => events.filter(e => e.active), [events]);
 
   // Derive current metrics
-  const metrics = calculateSimulationFrame(year, scenario, activeEvents, tickSeed);
+  const metrics = useMemo(
+    () => calculateSimulationFrame(year, scenario, activeEvents, tickSeed),
+    [year, scenario, activeEvents, tickSeed]
+  );
 
-  // Playback timer loop
+  // Playback timer & dynamic events countdown loop
   useEffect(() => {
+    const hasActiveEvents = activeEvents.length > 0;
+    if (!isPlaying && !hasActiveEvents) return;
+
     let animId: number;
     let lastTime = performance.now();
+    let noiseTimer = 0;
 
     const loop = (now: number) => {
-      const dt = (now - lastTime) / 1000;
+      const dt = Math.min(0.1, (now - lastTime) / 1000);
       lastTime = now;
-
-      setTickSeed(prev => prev + 1);
+      noiseTimer += dt;
 
       // Decrement duration of active events
-      setEvents(prevEvents => {
-        let changed = false;
-        const updated = prevEvents.map(ev => {
-          if (!ev.active) return ev;
-          const remaining = ev.durationSeconds - dt;
-          if (remaining <= 0) {
-            changed = true;
-            return { ...ev, durationSeconds: 0, active: false };
-          }
-          return { ...ev, durationSeconds: remaining };
+      if (hasActiveEvents) {
+        setEvents(prevEvents => {
+          let changed = false;
+          const updated = prevEvents.map(ev => {
+            if (!ev.active) return ev;
+            const remaining = ev.durationSeconds - dt;
+            if (remaining <= 0) {
+              changed = true;
+              return { ...ev, durationSeconds: 0, active: false };
+            }
+            return { ...ev, durationSeconds: remaining };
+          });
+          return changed ? updated : prevEvents;
         });
-        return changed ? updated : prevEvents;
-      });
+      }
 
       if (isPlaying) {
         setYearState(prev => {
@@ -124,6 +132,12 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
           }
           return next;
         });
+
+        // Throttle stochastic noise updates to ~4Hz during playback instead of 60Hz
+        if (noiseTimer >= 0.25) {
+          noiseTimer = 0;
+          setTickSeed(prev => (prev + 1) % 10000);
+        }
       }
 
       animId = requestAnimationFrame(loop);
@@ -131,7 +145,7 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, playbackSpeed]);
+  }, [isPlaying, playbackSpeed, activeEvents.length]);
 
   // Sync audio toggle with soundEffects service
   const toggleAudio = useCallback(() => {
@@ -215,38 +229,66 @@ export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     soundEffects.playClick();
   }, []);
 
+  const contextValue = useMemo(() => ({
+    year,
+    targetYear,
+    isPlaying,
+    playbackSpeed,
+    scenario,
+    metrics,
+    events,
+    activeEvents,
+    selectedSubsystem,
+    selectedNode,
+    visualLayers,
+    audioEnabled,
+    isConsoleOpen,
+    isChartsOpen,
+    setYear,
+    jumpToMilestone,
+    togglePlay,
+    setPlaybackSpeed,
+    setScenarioById,
+    triggerEvent,
+    dismissEvent,
+    setSelectedSubsystem,
+    setSelectedNode,
+    toggleLayer,
+    toggleAudio,
+    toggleConsole,
+    toggleCharts
+  }), [
+    year,
+    targetYear,
+    isPlaying,
+    playbackSpeed,
+    scenario,
+    metrics,
+    events,
+    activeEvents,
+    selectedSubsystem,
+    selectedNode,
+    visualLayers,
+    audioEnabled,
+    isConsoleOpen,
+    isChartsOpen,
+    setYear,
+    jumpToMilestone,
+    togglePlay,
+    setPlaybackSpeed,
+    setScenarioById,
+    triggerEvent,
+    dismissEvent,
+    setSelectedSubsystem,
+    setSelectedNode,
+    toggleLayer,
+    toggleAudio,
+    toggleConsole,
+    toggleCharts
+  ]);
+
   return (
-    <SimulationContext.Provider
-      value={{
-        year,
-        targetYear,
-        isPlaying,
-        playbackSpeed,
-        scenario,
-        metrics,
-        events,
-        activeEvents,
-        selectedSubsystem,
-        selectedNode,
-        visualLayers,
-        audioEnabled,
-        isConsoleOpen,
-        isChartsOpen,
-        setYear,
-        jumpToMilestone,
-        togglePlay,
-        setPlaybackSpeed,
-        setScenarioById,
-        triggerEvent,
-        dismissEvent,
-        setSelectedSubsystem,
-        setSelectedNode,
-        toggleLayer,
-        toggleAudio,
-        toggleConsole,
-        toggleCharts
-      }}
-    >
+    <SimulationContext.Provider value={contextValue}>
       {children}
     </SimulationContext.Provider>
   );
